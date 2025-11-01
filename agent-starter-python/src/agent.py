@@ -213,7 +213,7 @@ class Assistant(Agent):
         doc_watch = doc_ref.on_snapshot(on_snapshot)
         
         try:
-            await asyncio.wait_for(response_received.wait(), timeout=3600.0)
+            await asyncio.wait_for(response_received.wait(), timeout=60.0)
             
             if supervisor_response:
                 # Add supervisor's answer to knowledge base context
@@ -233,6 +233,14 @@ class Assistant(Agent):
                     
         except asyncio.TimeoutError:
             logger.warning(f"Timed out waiting for response for request {request_id}")
+            try:
+                doc_ref.update({
+                    'status': 'unresolved',
+                    'resolvedAt': firestore.SERVER_TIMESTAMP 
+                })
+                logger.info(f"Marked request {request_id} as 'unresolved' due to timeout.")
+            except Exception as e:
+                logger.error(f"Failed to mark request {request_id} as unresolved: {e}")
         finally:
             logger.info(f"Unsubscribing from request {request_id}")
             doc_watch.unsubscribe()

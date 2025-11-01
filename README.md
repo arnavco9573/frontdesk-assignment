@@ -1,139 +1,220 @@
-# FrontDesk — LiveKit Agents demo
+# Human-in-the-Loop AI Voice Agent
 
-A local starter workspace that demonstrates a voice AI receptionist built with LiveKit Agents (Python), a small FastAPI backend, and a Next.js frontend supervisor. This repo ties together a voice agent, a backend help-request workflow, and a simple supervisor UI to show how an agent can escalate questions to a human and learn via embeddings.
+This project is a demonstration of a "Human-in-the-Loop" voice AI system. It features a voice agent (the "receptionist") that can answer customer questions. When it doesn't know an answer, it escalates the question to a human supervisor in real-time, learns the new answer, and immediately provides it to the customer.
 
-## Why this project is useful
+This system is built with three core components:
+1.  **AI Voice Agent (`agent.py`):** A Python agent using the LiveKit Agents SDK. It handles the live voice call, STT/TTS, and conversational logic.
+2.  **Backend API (`main.py`):** A FastAPI server that acts as the bridge. It handles escalation requests from the agent and resolution submissions from the supervisor.
+3.  **Supervisor Dashboard (`Dashboard.tsx`):** A React component (for a Next.js app) that provides a real-time dashboard for supervisors to see and respond to pending help requests.
 
-- Provides an end-to-end example of building a voice AI assistant using LiveKit Agents for Python.
-- Demonstrates real-world features: speech-to-text (STT), text-to-speech (TTS), LLM integration, and a supervisor escalation flow backed by Firestore.
-- Includes embeddings-based RAG: resolved supervisor answers are embedded and stored in a knowledge base for retrieval-augmented responses.
+## System Design & Flow (Design Notes)
 
-## Key features
+This project's core is the "Human-in-the-Loop" flow, which ensures the agent can learn and resolve issues it has never seen before.
 
-- Voice agent and session orchestration (see `agent-starter-python/`).
-- Backend API for creating and resolving help requests, and for indexing resolved answers into `knowledge_base` (see `backend-api/`).
-- Simple Next.js supervisor UI to view/resolve help requests (see `frontend-supervisor/`).
+1.  **Initial Query:** A user calls the LiveKit agent and asks a question.
+2.  **KB Search (RAG):** The agent (`agent.py`) first queries its **Firestore `knowledge_base` collection** to see if it already knows the answer (Retrieval-Augmented Generation).
+3.  **Escalation:** If the answer is not found (or the confidence is too low), the agent's `request_human_supervisor` tool is triggered.
+4.  **Agent -> Backend:** The agent sends the user's query and conversation history to the **FastAPI backend** (`POST /api/help-requests`).
+5.  **Backend -> Firestore:** The backend (`main.py`) creates a new document in the **`help_requests` collection** with a `status: 'pending'`.
+6.  **Agent -> Firestore (Listen):** After sending the request, the agent (`agent.py`) creates a background task (`_listen_for_resolution`) that opens a real-time `on_snapshot` listener on that *specific* Firestore document.
+7.  **Dashboard -> Firestore (Listen):** The **Supervisor Dashboard** (`Dashboard.tsx`) is also listening to the `help_requests` collection and immediately displays the new "pending" request on the UI, along with a 60-second countdown timer.
+8.  **The Loop Closes (Two Paths):**
+    * **Path A: Supervisor Responds (Resolved)**
+        * The supervisor types an answer and clicks "Submit" on the dashboard.
+        * The dashboard sends the answer to the **FastAPI backend** (`PUT /api/help-requests/.../resolve`).
+        * The backend updates the `help_requests` doc to `status: 'resolved'`.
+        * **Crucially, the backend also embeds the new Q&A and saves it to the `knowledge_base` collection.**
+        * The agent's Firestore listener (`_listen_for_resolution`) fires instantly.
+        * The agent uses `session.say()` to speak the supervisor's answer back to the user on the call, closing the loop.
+    * **Path B: No Response (Unresolved)**
+        * The 60-second timer on the agent's listener (`_listen_for_resolution`) expires.
+        * The agent itself updates the Firestore document, setting its `status: 'unresolved'`.
+        * The "Pending" card disappears from the dashboard and now appears in the "History" tab as "Unresolved".
 
-## Contents
+This event-driven design using Firestore as a central state manager allows all three components to communicate asynchronously without direct connections.
 
-- `agent-starter-python/` — Python LiveKit Agents example (agent code, tests, example Dockerfile). See `agent-starter-python/AGENTS.md` for agent-specific docs.
-- `backend-api/` — FastAPI backend that stores help requests in Firestore and saves embeddings to the knowledge base.
-- `frontend-supervisor/` — Next.js app with a minimal supervisor UI and Firebase integration.
-- `service-account.json` — (local) Firebase service account used by the backend/agent. Keep this secret; do not commit to public repos.
-- `.github/prompts/create-readme.prompt.md` — authoring prompt used to generate this README.
+## Setup and Running
 
-## Quick start (developer)
+### Prerequisites
 
-Prerequisites
+* Python 3.10+
+* Node.js (for the supervisor dashboard)
+* A **Google Firebase** project with **Firestore** enabled.
+* A **LiveKit Cloud** account (or self-hosted instance).
 
-- Python 3.11+ (the project includes a small helper tool called `uv` used to run the agent; a separate venv is not required for the agent when using `uv`).
-- Node.js 18+ and pnpm/npm for the frontend.
-- A LiveKit Cloud instance (or self-hosted LiveKit) with API key/secret.
-- A Google API key for embeddings (if you want embeddings functionality) and Firebase project + service account JSON for Firestore.
+### 1. Initial Setup
 
-Important environment variables
+1.  **Firebase:**
+    * In your Firebase project, go to "Project settings" > "Service accounts".
+    * Generate a new private key and download the `service-account.json` file.
+    * Place this `service-account.json` file in the root of your project.
+2.  **Firestore:**
+    * Go to the Firestore Database section and create a database.
+    * It will start empty. The collections (`help_requests`, `knowledge_base`) will be created automatically when the app runs.
+3.  **Google AI:**
+    * Go to Google AI Studio and get an API Key. This is needed for generating the embeddings.
+4.  **Environment Variables:**
+    * Create a `.env` file in your project's root directory and add your keys:
 
-Set these before running the services. You can copy `.env.example` files shipped in subprojects and create a local `.env.local`.
+    ```env
+    # LiveKit credentials
+    LIVEKIT_URL=wss://YOUR_PROJECT_NAME.livekit.cloud
+    LIVEKIT_API_KEY=YOUR_API_KEY
+    LIVEKIT_API_SECRET=YOUR_API_SECRET
 
-- `LIVEKIT_URL` — e.g. `wss://assignment-XXXX.livekit.cloud`
-- `LIVEKIT_API_KEY`
-- `LIVEKIT_API_SECRET`
-- `GOOGLE_API_KEY` — for embeddings (used by `backend-api` and the agent).
-- `FIREBASE_SERVICE_ACCOUNT` or place `service-account.json` at the repository root for local dev.
+    # Google API Key for embeddings
+    GOOGLE_API_KEY=YOUR_GOOGLE_AI_API_KEY
+    ```
 
-Run the backend (FastAPI)
+### 2. Create `requirements.txt` Files
 
-Open a terminal, activate the backend venv if present, then:
+You'll need two `requirements.txt` files.
 
-```bat
-cd backend-api
-# create/activate venv (Windows, adjust if using global env)
-python -m venv .venv
-.venv\Scripts\activate
+**For the Backend (save as `backend-requirements.txt`):**
+```txt
+fastapi
+uvicorn[standard]
+firebase-admin
+google-generativeai
+python-dotenv
+```
+Markdown
+
+# Human-in-the-Loop AI Voice Agent
+
+This project is a demonstration of a "Human-in-the-Loop" voice AI system. It features a voice agent (the "receptionist") that can answer customer questions. When it doesn't know an answer, it escalates the question to a human supervisor in real-time, learns the new answer, and immediately provides it to the customer.
+
+This system is built with three core components:
+1.  **AI Voice Agent (`agent.py`):** A Python agent using the LiveKit Agents SDK. It handles the live voice call, STT/TTS, and conversational logic.
+2.  **Backend API (`main.py`):** A FastAPI server that acts as the bridge. It handles escalation requests from the agent and resolution submissions from the supervisor.
+3.  **Supervisor Dashboard (`Dashboard.tsx`):** A React component (for a Next.js app) that provides a real-time dashboard for supervisors to see and respond to pending help requests.
+
+## System Design & Flow (Design Notes)
+
+This project's core is the "Human-in-the-Loop" flow, which ensures the agent can learn and resolve issues it has never seen before.
+
+1.  **Initial Query:** A user calls the LiveKit agent and asks a question.
+2.  **KB Search (RAG):** The agent (`agent.py`) first queries its **Firestore `knowledge_base` collection** to see if it already knows the answer (Retrieval-Augmented Generation).
+3.  **Escalation:** If the answer is not found (or the confidence is too low), the agent's `request_human_supervisor` tool is triggered.
+4.  **Agent -> Backend:** The agent sends the user's query and conversation history to the **FastAPI backend** (`POST /api/help-requests`).
+5.  **Backend -> Firestore:** The backend (`main.py`) creates a new document in the **`help_requests` collection** with a `status: 'pending'`.
+6.  **Agent -> Firestore (Listen):** After sending the request, the agent (`agent.py`) creates a background task (`_listen_for_resolution`) that opens a real-time `on_snapshot` listener on that *specific* Firestore document.
+7.  **Dashboard -> Firestore (Listen):** The **Supervisor Dashboard** (`Dashboard.tsx`) is also listening to the `help_requests` collection and immediately displays the new "pending" request on the UI, along with a 60-second countdown timer.
+8.  **The Loop Closes (Two Paths):**
+    * **Path A: Supervisor Responds (Resolved)**
+        * The supervisor types an answer and clicks "Submit" on the dashboard.
+        * The dashboard sends the answer to the **FastAPI backend** (`PUT /api/help-requests/.../resolve`).
+        * The backend updates the `help_requests` doc to `status: 'resolved'`.
+        * **Crucially, the backend also embeds the new Q&A and saves it to the `knowledge_base` collection.**
+        * The agent's Firestore listener (`_listen_for_resolution`) fires instantly.
+        * The agent uses `session.say()` to speak the supervisor's answer back to the user on the call, closing the loop.
+    * **Path B: No Response (Unresolved)**
+        * The 60-second timer on the agent's listener (`_listen_for_resolution`) expires.
+        * The agent itself updates the Firestore document, setting its `status: 'unresolved'`.
+        * The "Pending" card disappears from the dashboard and now appears in the "History" tab as "Unresolved".
+
+This event-driven design using Firestore as a central state manager allows all three components to communicate asynchronously without direct connections.
+
+## Setup and Running
+
+### Prerequisites
+
+* Python 3.10+
+* Node.js (for the supervisor dashboard)
+* A **Google Firebase** project with **Firestore** enabled.
+* A **LiveKit Cloud** account (or self-hosted instance).
+
+### 1. Initial Setup
+
+1.  **Firebase:**
+    * In your Firebase project, go to "Project settings" > "Service accounts".
+    * Generate a new private key and download the `service-account.json` file.
+    * Place this `service-account.json` file in the root of your project.
+2.  **Firestore:**
+    * Go to the Firestore Database section and create a database.
+    * It will start empty. The collections (`help_requests`, `knowledge_base`) will be created automatically when the app runs.
+3.  **Google AI:**
+    * Go to Google AI Studio and get an API Key. This is needed for generating the embeddings.
+4.  **Environment Variables:**
+    * Create a `.env` file in your project's root directory and add your keys:
+
+    ```env
+    # LiveKit credentials
+    LIVEKIT_URL=wss://YOUR_PROJECT_NAME.livekit.cloud
+    LIVEKIT_API_KEY=YOUR_API_KEY
+    LIVEKIT_API_SECRET=YOUR_API_SECRET
+
+    # Google API Key for embeddings
+    GOOGLE_API_KEY=YOUR_GOOGLE_AI_API_KEY
+    ```
+
+### 2. Create `requirements.txt` Files
+
+You'll need two `requirements.txt` files.
+
+**For the Backend (save as `backend-requirements.txt`):**
+```txt
+fastapi
+uvicorn[standard]
+firebase-admin
+google-generativeai
+python-dotenv
+For the Agent (save as agent-requirements.txt):
+livekit-agents
+firebase-admin
+google-generativeai
+requests
+numpy
+python-dotenv
+```
+
+### 3. Run the System
+
+You will need three separate terminals.
+
+Terminal 1: Run the Backend API
+
+# Create and activate a virtual environment
+```bash
+python -m venv venv_backend
+source venv_backend/bin/activate  # (or venv_backend\Scripts\activate on Windows)
+
+# Install dependencies
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+
+# Run the server
+uvicorn main:app --reload 
 ```
 
-Run the agent (LiveKit Agents)
-
-This starter uses the repository's `uv` helper for the agent (no manual venv activation is required when using `uv`). To set up and run the agent use the following Windows cmd steps:
-
-```bat
-cd agent-starter-python
+Terminal 2: Run the LiveKit Agent
+```bash
+# 1. Sync base dependencies (assumes a requirements.txt or pyproject.toml
+# for base agent dependencies like livekit-agents, requests, etc.)
 uv sync
+
+# 2. Install specific dependencies
 uv pip install google-generativeai numpy
-# Place your Firebase service account JSON at the repo root (or inside agent-starter-python) as `service-account.json`.
-# Create a `.env.local` in `agent-starter-python` and add the following values:
-# LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, and GOOGLE_API_KEY
 
-# Run the agent in console mode:
-uv run python src\agent.py console
+# 3. Run the agent worker
+# (This command assumes your agent file is at 'src/agent.py')
+uv run python src/agent.py console
 ```
 
-Notes
+Terminal 3: Run the Supervisor Frontend
 
-- If you prefer to run inside a venv, you can still create one and install `requirements.txt`, but the `uv` helper is the intended dev workflow for the agent in this repo.
+# cd into your Next.js/React project directory
+``` bash
+cd /path/to/your/frontend-project
 
-Notes
-
-- The agent expects `LIVEKIT_*` env vars to be present. Use `.env.local` or export them in your shell before running.
-- If the agent fails to connect to STT/TTS endpoints and you see websocket 401 errors, double-check `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and system clock.
-
-Run the supervisor frontend (Next.js)
-
-```bat
-cd frontend-supervisor
+# Install dependencies (if you haven't)
 npm install
+
+# Run the dev server
 npm run dev
-# Frontend runs at http://localhost:3000 by default
+
 ```
 
-## How the help-request flow works
+Your system is now live. You can go to http://localhost:3000 to see the dashboard and join a LiveKit room to talk to your agent.
 
-1. The agent receives a user question it cannot answer.
-2. The agent POSTs `POST http://127.0.0.1:8000/api/help-requests` with the query and conversation history.
-3. The backend stores the request in Firestore and returns a `requestId`.
-4. A human supervisor resolves the request via the supervisor UI (or the `/api/help-requests/{id}/resolve` endpoint).
-5. The backend stores the supervisor answer and (optionally) creates an embedding to add the Q/A to `knowledge_base` for future retrieval.
-
-## Where to get help
-
-- Project docs: `agent-starter-python/AGENTS.md`.
-- LiveKit documentation: https://docs.livekit.io/ (for LiveKit Agents details).
-- Open an issue in this repository if you find a bug or need help.
-
-## Who maintains this project
-
-This repository was scaffolded from the LiveKit Agents starter projects. Update the maintainers list in this README to reflect actual owners.
-
-Maintainers
-
-- (Update this section) Primary maintainer: repository owner — please add contact handle or email.
-
-Contribution guidelines
-
-- Please open issues and pull requests.
-- For contribution workflow, tests and CI, follow the repository's existing patterns (see `.github/workflows/` and `agent-starter-python/AGENTS.md`).
-
-## Security
-
-- Do not commit `service-account.json` or any secrets to source control.
-- Rotate LiveKit API secrets and Google keys if they are exposed.
-
-## Next steps / suggested improvements
-
-- Add a `CONTRIBUTING.md` that documents the development flow and how to run tests locally.
-- Add CI secrets to GitHub (see `.github/workflows/tests.yml`).
-- Harden the agent with better retry/backoff and improve error handling for websocket auth failures.
-
----
-
-Files changed/created
-
-- `README.md` — this file: high-level project overview and bootstrap steps.
-
-If you'd like, I can also:
-- Add more detailed developer setup scripts (PowerShell/cmd) for Windows.
-- Create a `CONTRIBUTING.md` and short `SUPPORT.md`.
-
-Please tell me if you want the README focused on a particular subproject (agent, backend, or frontend) or if you want a shorter quickstart version.
+Security Note
+Do not commit your .env, .env.local, or service-account.json files to GitHub. Add them to your .gitignore file.

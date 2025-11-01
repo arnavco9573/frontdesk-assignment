@@ -19,7 +19,11 @@ interface HelpRequest {
         nanoseconds: number;
     };
     conversationHistory: Array<{ role: string; content: string }>;
-    supervisorResponse?: string; // History me dikhane ke liye
+    supervisorResponse?: string;
+    resolvedAt?: {
+        seconds: number;
+        nanoseconds: number;
+    };
 }
 
 interface KnowledgeBaseEntry {
@@ -70,9 +74,66 @@ function ResolveForm({ requestId }: { requestId: string }) {
                 disabled={isSubmitting}
             />
             <Button type="submit" disabled={isSubmitting} className="self-end">
-                {isSubmitting? 'Submitting...' : 'Submit Answer'}
+                {isSubmitting ? 'Submitting...' : 'Submit Answer'}
             </Button>
         </form>
+    );
+}
+
+const TIMEOUT_DURATION_SECONDS = 60;
+
+function formatTime(totalSeconds: number): string {
+    if (totalSeconds < 0) totalSeconds = 0;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = Math.floor(totalSeconds % 60);
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
+interface TimerBadgeProps {
+    createdAt: {
+        seconds: number;
+        nanoseconds: number;
+    };
+}
+
+function TimerBadge({ createdAt }: TimerBadgeProps) {
+    const [remainingTime, setRemainingTime] = useState(TIMEOUT_DURATION_SECONDS);
+
+    useEffect(() => {
+        const startTime = new Date(createdAt.seconds * 1000);
+
+        const calculateRemaining = () => {
+            const now = new Date();
+            const elapsed = (now.getTime() - startTime.getTime()) / 1000;
+            const remaining = TIMEOUT_DURATION_SECONDS - elapsed;
+            setRemainingTime(remaining);
+            return remaining;
+        };
+
+        // Set initial time immediately
+        const initialRemaining = calculateRemaining();
+
+        if (initialRemaining <= 0) return; // Don't start interval if already expired
+
+        // Update every second
+        const intervalId = setInterval(() => {
+            if (calculateRemaining() <= 0) {
+                clearInterval(intervalId);
+            }
+        }, 1000);
+
+        // Cleanup
+        return () => clearInterval(intervalId);
+    }, [createdAt]);
+
+    const isExpired = remainingTime <= 0;
+    const timeText = isExpired ? "Expired" : formatTime(remainingTime);
+    const variant = isExpired ? "destructive" : (remainingTime < 30 ? "secondary" : "default");
+
+    return (
+        <Badge variant={variant} className="ml-auto font-mono">
+            {timeText}
+        </Badge>
     );
 }
 
@@ -99,15 +160,41 @@ function PendingRequests() {
 
     return (
         <div className="grid gap-4">
-            {requests.length > 0? (
+            {requests.length > 0 ? (
                 requests.map((req) => (
                     <Card key={req.id}>
                         <CardHeader>
-                            <CardTitle>Query: {req.originalQuery}</CardTitle>
-                            <CardDescription>Received: {new Date(req.createdAt.seconds * 1000).toLocaleString()}</CardDescription>
+                            <div className="flex justify-between items-start">
+                                <div>
+                                    <CardTitle>Query: {req.originalQuery}</CardTitle>
+                                    <CardDescription>
+                                        Received: {new Date(req.createdAt.seconds * 1000).toLocaleString()}
+                                    </CardDescription>
+                                </div>
+
+                                <TimerBadge createdAt={req.createdAt} />
+                            </div>
                         </CardHeader>
                         <CardContent>
-                            {/* Conversation History... */}
+                            <div className="space-y-3">
+                                <h4 className="font-semibold">Conversation History:</h4>
+                                <div className="max-h-48 overflow-y-auto p-3 bg-slate-50 rounded-md space-y-2 text-sm">
+                                    {req.conversationHistory && req.conversationHistory
+                                        .filter(msg => (msg.role === 'user' || msg.role === 'assistant') && msg.content) // Filter for useful roles
+                                        .map((msg, index) => (
+                                            <div key={index}>
+                                                <span className={`font-bold ${msg.role === 'user' ? 'text-blue-600' : 'text-purple-600'}`}>
+                                                    {msg.role === 'user' ? 'User' : 'Agent'}:
+                                                </span>
+                                                <p className="pl-2">{msg.content}</p>
+                                            </div>
+                                        ))
+                                    }
+                                    {(!req.conversationHistory || req.conversationHistory.filter(msg => (msg.role === 'user' || msg.role === 'assistant') && msg.content).length === 0) && (
+                                        <p className="italic text-slate-500">No conversation history available.</p>
+                                    )}
+                                </div>
+                            </div>
                         </CardContent>
                         <CardFooter>
                             <ResolveForm requestId={req.id} />
@@ -129,7 +216,7 @@ function HistoryRequests() {
     useEffect(() => {
         const q = query(
             collection(db, 'help_requests'),
-            where('status', '==', 'resolved'), // Sirf resolved wale
+            where('status', 'in', ['resolved', 'unresolved']), // This query is correct!
             orderBy('createdAt', 'desc')
         );
         const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -144,21 +231,53 @@ function HistoryRequests() {
 
     return (
         <div className="grid gap-4">
-            {requests.length > 0? (
-                requests.map((req) => (
-                    <Card key={req.id} className="bg-slate-50">
-                        <CardHeader>
-                            <CardTitle>Query: {req.originalQuery}</CardTitle>
-                            <CardDescription>Resolved on: {new Date(req.createdAt.seconds * 1000).toLocaleString()}</CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                            <p className="font-semibold">Supervisor's Answer:</p>
-                            <p className="p-2 bg-white rounded-md">{req.supervisorResponse}</p>
-                        </CardContent>
-                    </Card>
-                ))
+            {requests.length > 0 ? (
+                requests.map((req) => {
+                    // Check status to render card differently
+                    const isResolved = req.status === 'resolved';
+
+                    // Use 'resolvedAt' if it exists, otherwise fall back to 'createdAt'
+                    const displayDate = req.resolvedAt
+                        ? new Date(req.resolvedAt.seconds * 1000)
+                        : new Date(req.createdAt.seconds * 1000);
+
+                    const dateDescription = isResolved
+                        ? `Resolved on: ${displayDate.toLocaleString()}`
+                        : `Timed out on: ${displayDate.toLocaleString()}`;
+
+                    return (
+                        <Card key={req.id} className={isResolved ? "bg-green-50" : "bg-rose-50"}>
+                            <CardHeader>
+                                <div className="flex justify-between items-start">
+                                    <div>
+                                        <CardTitle>Query: {req.originalQuery}</CardTitle>
+                                        <CardDescription>{dateDescription}</CardDescription>
+                                    </div>
+                                    <Badge variant={isResolved ? "default" : "destructive"}
+                                        className={isResolved ? "bg-green-600" : ""}>
+                                        {isResolved ? "Resolved" : "Unresolved"}
+                                    </Badge>
+                                </div>
+                            </CardHeader>
+                            <CardContent>
+                                {isResolved ? (
+                                    // If RESOLVED, show the answer
+                                    <>
+                                        <p className="font-semibold">Supervisor's Answer:</p>
+                                        <p className="p-2 bg-white rounded-md">{req.supervisorResponse}</p>
+                                    </>
+                                ) : (
+                                    // If UNRESOLVED, show a timeout message
+                                    <p className="p-2 bg-white/70 rounded-md italic text-slate-700">
+                                        This request timed out before a supervisor could respond.
+                                    </p>
+                                )}
+                            </CardContent>
+                        </Card>
+                    );
+                })
             ) : (
-                <p>No resolved requests yet.</p>
+                <p>No historical requests yet.</p>
             )}
         </div>
     );
